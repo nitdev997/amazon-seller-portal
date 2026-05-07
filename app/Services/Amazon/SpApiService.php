@@ -76,7 +76,7 @@ class SpApiService
 
         $params = [
             'MarketplaceIds' => $account->marketplace_id ?? config('amazon-sp-api.default_marketplace_id'),
-            'CreatedAfter'   => $createdAfter->toIso8601String(),
+            'CreatedAfter'   => $createdAfter->utc()->format('Y-m-d\TH:i:s\Z'),
         ];
 
         if ($nextToken) {
