@@ -75,7 +75,7 @@ class SpApiService
         $accessToken = $this->oauthService->getValidAccessToken($account);
 
         $params = [
-            'MarketplaceIds' => $account->marketplace_id,
+            'MarketplaceIds' => $account->marketplace_id ?? config('amazon-sp-api.default_marketplace_id'),
             'CreatedAfter'   => $createdAfter->toIso8601String(),
         ];
 
@@ -86,7 +86,7 @@ class SpApiService
         // NOTE: In production you must sign requests with AWS SigV4.
         // Use the `jlevers/selling-partner-api` package which handles this.
         // Here we show the raw HTTP call structure for illustration.
-        $endpoint = $this->getEndpointForMarketplace($account->marketplace_id);
+        $endpoint = $this->getEndpointForMarketplace($account->marketplace_id ?? config('amazon-sp-api.default_marketplace_id'));
 
         $response = Http::withHeaders([
             'x-amz-access-token' => $accessToken,
@@ -186,7 +186,7 @@ class SpApiService
      * SP-API has region-specific endpoints.
      * https://developer-docs.amazon.com/sp-api/docs/sp-api-endpoints
      */
-    private function getEndpointForMarketplace(string $marketplaceId): string
+    private function getEndpointForMarketplace(?string $marketplaceId): string
     {
         return match (true) {
             // North America
