@@ -144,7 +144,7 @@
                     @forelse($orders as $order)
                         <tr class="hover:bg-gray-50 transition group">
                             <td class="px-4 py-3">
-                                <div class="font-mono text-xs font-medium text-gray-900">{{ $order->amazon_order_id }}</div>
+                                <a href="{{ route('orders.show', $order->amazon_order_id) }}" class="font-mono text-xs font-medium text-gray-900 hover:text-orange-500 hover:underline transition">{{ $order->amazon_order_id }}</a>
                                 @if($order->is_prime)
                                     <span class="inline-block mt-0.5 text-xs text-blue-600 font-medium">Prime</span>
                                 @endif
