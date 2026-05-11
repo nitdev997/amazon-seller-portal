@@ -22,7 +22,7 @@ class SpApiService
 
     public function syncOrders(AmazonAccount $account, ?Carbon $createdAfter = null): int
     {
-        $createdAfter ??= now()->subDays(30);
+        $createdAfter ??= now()->subDays(15);
         $synced    = 0;
         $nextToken = null;
 
