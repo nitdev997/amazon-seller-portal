@@ -25,6 +25,8 @@ class OrderItem extends Model
         'shipping_tax',
         'promotion_discount',
         'currency_code',
+        'customization_url',
+        'customization_data',
         'raw_data',
     ];
 
@@ -34,11 +36,21 @@ class OrderItem extends Model
         'shipping_price'     => 'decimal:2',
         'shipping_tax'       => 'decimal:2',
         'promotion_discount' => 'decimal:2',
+        'customization_data' => 'array',
         'raw_data'           => 'array',
     ];
+
+    // ─── Relationships ────────────────────────────────────────────
 
     public function order(): BelongsTo
     {
         return $this->belongsTo(Order::class);
+    }
+
+    // ─── Helpers ──────────────────────────────────────────────────
+
+    public function hasCustomization(): bool
+    {
+        return !empty($this->customization_data);
     }
 }
