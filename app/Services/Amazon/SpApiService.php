@@ -14,15 +14,16 @@ class SpApiService
     private const ORDERS_API_PATH = '/orders/v0/orders';
 
     public function __construct(
-        private readonly SpApiOAuthService   $oauthService,
-        private readonly CustomizationService $customizationService,
+        private readonly SpApiOAuthService        $oauthService,
+        private readonly CustomizationService     $customizationService,
+        private readonly RestrictedDataTokenService $rdtService,
     ) {}
 
     // ─── Sync orders ──────────────────────────────────────────────
 
     public function syncOrders(AmazonAccount $account, ?Carbon $createdAfter = null): int
     {
-        $createdAfter ??= now()->subDays(15);
+        $createdAfter ??= now()->subDays(30);
         $synced    = 0;
         $nextToken = null;
 
@@ -135,6 +136,11 @@ class SpApiService
      */
     private function fetchOrderItems(AmazonAccount $account, string $orderId): array
     {
+        // Request a Restricted Data Token so Amazon includes
+        // BuyerCustomizedInfo and shippingAddress in the response.
+        // Falls back to regular access token if RDT request fails.
+        $rdt = $this->rdtService->getOrderItemsToken($account, $orderId);
+
         $items     = [];
         $nextToken = null;
 
@@ -143,7 +149,8 @@ class SpApiService
             $response = $this->spApiGet(
                 $account,
                 self::ORDERS_API_PATH . "/{$orderId}/orderItems",
-                $params
+                $params,
+                $rdt  // pass RDT as override token
             );
 
             if ($response->failed()) {
@@ -161,15 +168,16 @@ class SpApiService
 
     // ─── Shared HTTP helper ───────────────────────────────────────
 
-    private function spApiGet(AmazonAccount $account, string $path, array $params = [])
+    private function spApiGet(AmazonAccount $account, string $path, array $params = [], ?string $rdtToken = null)
     {
-        $accessToken = $this->oauthService->getValidAccessToken($account);
-        $endpoint    = $this->getEndpointForMarketplace(
+        // Use RDT if provided, otherwise use the regular LWA access token
+        $token    = $rdtToken ?? $this->oauthService->getValidAccessToken($account);
+        $endpoint = $this->getEndpointForMarketplace(
             $account->marketplace_id ?? config('amazon-sp-api.default_marketplace_id')
         );
 
         return Http::withHeaders([
-            'x-amz-access-token' => $accessToken,
+            'x-amz-access-token' => $token,
             'Content-Type'       => 'application/json',
         ])->get("{$endpoint}{$path}", $params);
     }
@@ -223,10 +231,19 @@ class SpApiService
             $shipping         = $item['ShippingPrice'] ?? null;
             $customizationUrl = $item['BuyerCustomizedInfo']['CustomizedURL'] ?? null;
 
-            // Fetch & parse customization ZIP if present
+            // Fetch & parse customization ZIP if present.
+            // NOTE: CustomizedURL is only returned when your SP-API app
+            // has the "Amazon Custom" role enabled in Developer Central.
+            // If $customizationUrl is always null, check your app's roles.
             $customizationData = null;
             if ($customizationUrl) {
                 $customizationData = $this->customizationService->fetchAndParse($customizationUrl);
+            } elseif (!empty($item['BuyerCustomizedInfo'])) {
+                // BuyerCustomizedInfo exists but no URL — log for debugging
+                Log::info('BuyerCustomizedInfo present but no CustomizedURL', [
+                    'order_item_id' => $item['OrderItemId'] ?? null,
+                    'info'          => $item['BuyerCustomizedInfo'],
+                ]);
             }
 
             OrderItem::withoutGlobalScope('tenant')->updateOrCreate(

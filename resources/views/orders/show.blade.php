@@ -142,7 +142,16 @@
                                 </div>
 
                                 {{-- Customization data --}}
-                                @if($item->hasCustomization())
+                                @php
+                                    // Parsed ZIP data (after Amazon Custom role is enabled)
+                                    $customFields = $item->customization_data ?? [];
+
+                                    // Fallback: read directly from raw_data if ZIP not parsed yet
+                                    if (empty($customFields) && !empty($item->raw_data['BuyerCustomizedInfo']['CustomizedURL'])) {
+                                        $customFields = [['label' => 'Customization URL', 'value' => $item->raw_data['BuyerCustomizedInfo']['CustomizedURL']]];
+                                    }
+                                @endphp
+                                @if(!empty($customFields))
                                 <div class="mt-3 rounded-lg border border-orange-200 bg-orange-50 overflow-hidden">
                                     <div class="flex items-center gap-2 px-3 py-2 border-b border-orange-100">
                                         <svg class="w-3.5 h-3.5 text-orange-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -151,7 +160,7 @@
                                         <span class="text-xs font-semibold text-orange-700 uppercase tracking-wide">Customization</span>
                                     </div>
                                     <div class="px-3 py-2 grid grid-cols-1 gap-y-1.5">
-                                        @foreach($item->customization_data as $field)
+                                        @foreach($customFields as $field)
                                             @if(!empty($field['value']))
                                             <div class="flex gap-2 text-xs">
                                                 <span class="text-orange-600 font-medium shrink-0 min-w-24">
