@@ -140,6 +140,32 @@
                                         </span>
                                     </div>
                                 </div>
+
+                                {{-- Customization data --}}
+                                @if($item->hasCustomization())
+                                <div class="mt-3 rounded-lg border border-orange-200 bg-orange-50 overflow-hidden">
+                                    <div class="flex items-center gap-2 px-3 py-2 border-b border-orange-100">
+                                        <svg class="w-3.5 h-3.5 text-orange-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/>
+                                        </svg>
+                                        <span class="text-xs font-semibold text-orange-700 uppercase tracking-wide">Customization</span>
+                                    </div>
+                                    <div class="px-3 py-2 grid grid-cols-1 gap-y-1.5">
+                                        @foreach($item->customization_data as $field)
+                                            @if(!empty($field['value']))
+                                            <div class="flex gap-2 text-xs">
+                                                <span class="text-orange-600 font-medium shrink-0 min-w-24">
+                                                    {{ $field['label'] ?? 'Field' }}:
+                                                </span>
+                                                <span class="text-orange-900 font-semibold break-all">
+                                                    {{ $field['value'] }}
+                                                </span>
+                                            </div>
+                                            @endif
+                                        @endforeach
+                                    </div>
+                                </div>
+                                @endif
                             </div>
 
                             {{-- Pricing block --}}

@@ -14,7 +14,8 @@ class SpApiService
     private const ORDERS_API_PATH = '/orders/v0/orders';
 
     public function __construct(
-        private readonly SpApiOAuthService $oauthService
+        private readonly SpApiOAuthService   $oauthService,
+        private readonly CustomizationService $customizationService,
     ) {}
 
     // ─── Sync orders ──────────────────────────────────────────────
@@ -217,9 +218,16 @@ class SpApiService
     private function upsertOrderItems(Order $order, array $items): void
     {
         foreach ($items as $item) {
-            $itemPrice = $item['ItemPrice'] ?? null;
-            $itemTax   = $item['ItemTax'] ?? null;
-            $shipping  = $item['ShippingPrice'] ?? null;
+            $itemPrice        = $item['ItemPrice'] ?? null;
+            $itemTax          = $item['ItemTax'] ?? null;
+            $shipping         = $item['ShippingPrice'] ?? null;
+            $customizationUrl = $item['BuyerCustomizedInfo']['CustomizedURL'] ?? null;
+
+            // Fetch & parse customization ZIP if present
+            $customizationData = null;
+            if ($customizationUrl) {
+                $customizationData = $this->customizationService->fetchAndParse($customizationUrl);
+            }
 
             OrderItem::withoutGlobalScope('tenant')->updateOrCreate(
                 [
@@ -227,17 +235,19 @@ class SpApiService
                     'order_item_id' => $item['OrderItemId'] ?? null,
                 ],
                 [
-                    'tenant_id'        => $order->tenant_id,
-                    'asin'             => $item['ASIN'] ?? null,
-                    'seller_sku'       => $item['SellerSKU'] ?? null,
-                    'title'            => $item['Title'] ?? null,
-                    'quantity_ordered' => $item['QuantityOrdered'] ?? 0,
-                    'quantity_shipped' => $item['QuantityShipped'] ?? 0,
-                    'item_price'       => $itemPrice['Amount'] ?? null,
-                    'item_tax'         => $itemTax['Amount'] ?? null,
-                    'shipping_price'   => $shipping['Amount'] ?? null,
-                    'currency_code'    => $itemPrice['CurrencyCode'] ?? null,
-                    'raw_data'         => $item,
+                    'tenant_id'          => $order->tenant_id,
+                    'asin'               => $item['ASIN'] ?? null,
+                    'seller_sku'         => $item['SellerSKU'] ?? null,
+                    'title'              => $item['Title'] ?? null,
+                    'quantity_ordered'   => $item['QuantityOrdered'] ?? 0,
+                    'quantity_shipped'   => $item['QuantityShipped'] ?? 0,
+                    'item_price'         => $itemPrice['Amount'] ?? null,
+                    'item_tax'           => $itemTax['Amount'] ?? null,
+                    'shipping_price'     => $shipping['Amount'] ?? null,
+                    'currency_code'      => $itemPrice['CurrencyCode'] ?? null,
+                    'customization_url'  => $customizationUrl,
+                    'customization_data' => $customizationData,
+                    'raw_data'           => $item,
                 ]
             );
         }
