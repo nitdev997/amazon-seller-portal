@@ -7,6 +7,7 @@ use App\Models\Order;
 use App\Models\OrderItem;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
+use App\Exceptions\RdtPendingReviewException;
 use Illuminate\Support\Facades\Log;
 
 class SpApiService
@@ -50,7 +51,8 @@ class SpApiService
                 $orderId = $amazonOrder['AmazonOrderId'];
 
                 // 1. Fetch buyer info (separate endpoint)
-                // Rate limit: 0.0167 req/s — sleep before each call
+                // NOTE: Requires RDT approval from Amazon (under review).
+                // Skipped gracefully if unauthorized or quota exceeded.
                 usleep(self::SLEEP_BUYER_INFO_MS);
                 try {
                     $buyerInfo = $this->fetchBuyerInfo($account, $orderId);
@@ -58,6 +60,8 @@ class SpApiService
                         $amazonOrder['BuyerInfo'] ?? [],
                         $buyerInfo
                     );
+                } catch (RdtPendingReviewException $e) {
+                    // RDT not approved yet — skip silently, no log spam
                 } catch (\Exception $e) {
                     Log::warning("Could not fetch buyer info for {$orderId}: " . $e->getMessage());
                 }
@@ -140,16 +144,23 @@ class SpApiService
             $body = $response->json();
             $code = $body['errors'][0]['code'] ?? '';
 
-            // On QuotaExceeded, wait longer and retry
+            // RDT under review — 403 Unauthorized or QuotaExceeded
+            if ($response->status() === 403 || $code === 'Unauthorized') {
+                throw new RdtPendingReviewException('RDT not yet approved');
+            }
+
+            // On QuotaExceeded, wait and retry
             if ($code === 'QuotaExceeded') {
                 $attempts++;
-                $waitSeconds = 60 * $attempts; // 60s, 120s, 180s
-                Log::info("BuyerInfo QuotaExceeded for {$orderId}, retrying in {$waitSeconds}s (attempt {$attempts}/{$maxRetries})");
+                if ($attempts >= $maxRetries) {
+                    throw new RdtPendingReviewException('BuyerInfo quota exceeded');
+                }
+                $waitSeconds = 10 * $attempts; // shorter wait: 10s, 20s
+                Log::info("BuyerInfo QuotaExceeded for {$orderId}, waiting {$waitSeconds}s");
                 sleep($waitSeconds);
                 continue;
             }
 
-            // Any other error — throw immediately
             throw new \Exception($response->body());
         }
 
