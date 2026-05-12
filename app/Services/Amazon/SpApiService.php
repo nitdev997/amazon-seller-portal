@@ -13,6 +13,15 @@ class SpApiService
 {
     private const ORDERS_API_PATH = '/orders/v0/orders';
 
+    // SP-API rate limits (requests/sec) — we sleep to stay under quota
+    // Orders list:    0.0167 req/s  → 1 per 60s  (but paginated, so we sleep less)
+    // Order buyerInfo: 0.0167 req/s  → 1 per 60s  per order
+    // Order items:    0.5 req/s    → 1 per 2s
+    // Tokens (RDT):   1.0 req/s    → 1 per 1s
+    private const SLEEP_BUYER_INFO_MS  = 700000;  // 0.7s  — stays under 0.0167/s burst
+    private const SLEEP_ORDER_ITEMS_MS = 2000000; // 2s    — stays under 0.5/s
+    private const SLEEP_RDT_MS         = 1000000; // 1s    — stays under 1.0/s
+
     public function __construct(
         private readonly SpApiOAuthService        $oauthService,
         private readonly CustomizationService     $customizationService,
@@ -41,6 +50,8 @@ class SpApiService
                 $orderId = $amazonOrder['AmazonOrderId'];
 
                 // 1. Fetch buyer info (separate endpoint)
+                // Rate limit: 0.0167 req/s — sleep before each call
+                usleep(self::SLEEP_BUYER_INFO_MS);
                 try {
                     $buyerInfo = $this->fetchBuyerInfo($account, $orderId);
                     $amazonOrder['BuyerInfo'] = array_merge(
@@ -55,6 +66,8 @@ class SpApiService
                 $order = $this->upsertOrder($account, $amazonOrder);
 
                 // 3. Fetch & upsert order items (separate endpoint)
+                // Rate limit: 0.5 req/s — sleep before each call
+                usleep(self::SLEEP_ORDER_ITEMS_MS);
                 try {
                     $items = $this->fetchOrderItems($account, $orderId);
                     if (!empty($items)) {
@@ -65,9 +78,6 @@ class SpApiService
                 }
 
                 $synced++;
-
-                // SP-API rate limit: stay within quota
-                sleep(1);
             }
 
             $nextToken = $payload['NextToken'] ?? null;
@@ -114,16 +124,36 @@ class SpApiService
      */
     private function fetchBuyerInfo(AmazonAccount $account, string $orderId): array
     {
-        $response = $this->spApiGet(
-            $account,
-            self::ORDERS_API_PATH . "/{$orderId}/buyerInfo"
-        );
+        $attempts = 0;
+        $maxRetries = 3;
 
-        if ($response->failed()) {
+        while ($attempts < $maxRetries) {
+            $response = $this->spApiGet(
+                $account,
+                self::ORDERS_API_PATH . "/{$orderId}/buyerInfo"
+            );
+
+            if ($response->successful()) {
+                return $response->json()['payload'] ?? [];
+            }
+
+            $body = $response->json();
+            $code = $body['errors'][0]['code'] ?? '';
+
+            // On QuotaExceeded, wait longer and retry
+            if ($code === 'QuotaExceeded') {
+                $attempts++;
+                $waitSeconds = 60 * $attempts; // 60s, 120s, 180s
+                Log::info("BuyerInfo QuotaExceeded for {$orderId}, retrying in {$waitSeconds}s (attempt {$attempts}/{$maxRetries})");
+                sleep($waitSeconds);
+                continue;
+            }
+
+            // Any other error — throw immediately
             throw new \Exception($response->body());
         }
 
-        return $response->json()['payload'] ?? [];
+        throw new \Exception("BuyerInfo quota exceeded after {$maxRetries} retries for order {$orderId}");
     }
 
     // ─── Fetch order items for a single order ─────────────────────
@@ -140,6 +170,7 @@ class SpApiService
         // BuyerCustomizedInfo and shippingAddress in the response.
         // Falls back to regular access token if RDT request fails.
         $rdt = $this->rdtService->getOrderItemsToken($account, $orderId);
+        usleep(self::SLEEP_RDT_MS); // Rate limit: 1 req/s on Tokens API
 
         $items     = [];
         $nextToken = null;
