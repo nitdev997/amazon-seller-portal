@@ -2,31 +2,27 @@
 
 namespace App\Services\Amazon;
 
+use App\Exceptions\RdtPendingReviewException;
 use App\Models\AmazonAccount;
 use App\Models\Order;
 use App\Models\OrderItem;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
-use App\Exceptions\RdtPendingReviewException;
 use Illuminate\Support\Facades\Log;
 
 class SpApiService
 {
     private const ORDERS_API_PATH = '/orders/v0/orders';
 
-    // SP-API rate limits (requests/sec) — we sleep to stay under quota
-    // Orders list:    0.0167 req/s  → 1 per 60s  (but paginated, so we sleep less)
-    // Order buyerInfo: 0.0167 req/s  → 1 per 60s  per order
-    // Order items:    0.5 req/s    → 1 per 2s
-    // Tokens (RDT):   1.0 req/s    → 1 per 1s
-    private const SLEEP_BUYER_INFO_MS  = 700000;  // 0.7s  — stays under 0.0167/s burst
-    private const SLEEP_ORDER_ITEMS_MS = 2000000; // 2s    — stays under 0.5/s
-    private const SLEEP_RDT_MS         = 1000000; // 1s    — stays under 1.0/s
+    // SP-API rate limits
+    // buyerInfo endpoint : 0.0167 req/s → sleep 0.7s between calls
+    // orderItems endpoint: 0.5 req/s   → sleep 2s between calls
+    private const SLEEP_BUYER_INFO_MS  = 700000;  // 0.7s
+    private const SLEEP_ORDER_ITEMS_MS = 2000000; // 2s
 
     public function __construct(
-        private readonly SpApiOAuthService        $oauthService,
-        private readonly CustomizationService     $customizationService,
-        private readonly RestrictedDataTokenService $rdtService,
+        private readonly SpApiOAuthService    $oauthService,
+        private readonly CustomizationService $customizationService,
     ) {}
 
     // ─── Sync orders ──────────────────────────────────────────────
@@ -38,11 +34,7 @@ class SpApiService
         $nextToken = null;
 
         do {
-            $response = $this->fetchOrderPage(
-                account: $account,
-                createdAfter: $createdAfter,
-                nextToken: $nextToken,
-            );
+            $response = $this->fetchOrderPage($account, $createdAfter, $nextToken);
 
             $payload = $response['payload'] ?? [];
             $orders  = $payload['Orders'] ?? [];
@@ -50,9 +42,7 @@ class SpApiService
             foreach ($orders as $amazonOrder) {
                 $orderId = $amazonOrder['AmazonOrderId'];
 
-                // 1. Fetch buyer info (separate endpoint)
-                // NOTE: Requires RDT approval from Amazon (under review).
-                // Skipped gracefully if unauthorized or quota exceeded.
+                // 1. Fetch buyer info (PII — skipped silently if 403)
                 usleep(self::SLEEP_BUYER_INFO_MS);
                 try {
                     $buyerInfo = $this->fetchBuyerInfo($account, $orderId);
@@ -61,16 +51,16 @@ class SpApiService
                         $buyerInfo
                     );
                 } catch (RdtPendingReviewException $e) {
-                    // RDT not approved yet — skip silently, no log spam
+                    // Buyer PII not accessible yet — skip silently
                 } catch (\Exception $e) {
                     Log::warning("Could not fetch buyer info for {$orderId}: " . $e->getMessage());
                 }
 
-                // 2. Upsert the order row
+                // 2. Upsert order row
                 $order = $this->upsertOrder($account, $amazonOrder);
 
-                // 3. Fetch & upsert order items (separate endpoint)
-                // Rate limit: 0.5 req/s — sleep before each call
+                // 3. Fetch order items — BuyerCustomizedInfo is returned here
+                //    automatically for Amazon Custom orders. No RDT needed.
                 usleep(self::SLEEP_ORDER_ITEMS_MS);
                 try {
                     $items = $this->fetchOrderItems($account, $orderId);
@@ -118,71 +108,48 @@ class SpApiService
         return $response->json();
     }
 
-    // ─── Fetch buyer info for a single order ──────────────────────
+    // ─── Fetch buyer info (PII — may 403 until RDT is approved) ──
 
-    /**
-     * GET /orders/v0/orders/{orderId}/buyerInfo
-     *
-     * Returns BuyerEmail, BuyerName, BuyerCounty, BuyerTaxInfo etc.
-     * Note: Amazon omits email/name when the buyer opts out of sharing.
-     */
     private function fetchBuyerInfo(AmazonAccount $account, string $orderId): array
     {
-        $attempts = 0;
-        $maxRetries = 3;
+        $response = $this->spApiGet(
+            $account,
+            self::ORDERS_API_PATH . "/{$orderId}/buyerInfo"
+        );
 
-        while ($attempts < $maxRetries) {
-            $response = $this->spApiGet(
-                $account,
-                self::ORDERS_API_PATH . "/{$orderId}/buyerInfo"
-            );
-
-            if ($response->successful()) {
-                return $response->json()['payload'] ?? [];
-            }
-
-            $body = $response->json();
-            $code = $body['errors'][0]['code'] ?? '';
-
-            // RDT under review — 403 Unauthorized or QuotaExceeded
-            if ($response->status() === 403 || $code === 'Unauthorized') {
-                throw new RdtPendingReviewException('RDT not yet approved');
-            }
-
-            // On QuotaExceeded, wait and retry
-            if ($code === 'QuotaExceeded') {
-                $attempts++;
-                if ($attempts >= $maxRetries) {
-                    throw new RdtPendingReviewException('BuyerInfo quota exceeded');
-                }
-                $waitSeconds = 10 * $attempts; // shorter wait: 10s, 20s
-                Log::info("BuyerInfo QuotaExceeded for {$orderId}, waiting {$waitSeconds}s");
-                sleep($waitSeconds);
-                continue;
-            }
-
-            throw new \Exception($response->body());
+        if ($response->successful()) {
+            return $response->json()['payload'] ?? [];
         }
 
-        throw new \Exception("BuyerInfo quota exceeded after {$maxRetries} retries for order {$orderId}");
+        $code = $response->json()['errors'][0]['code'] ?? '';
+
+        // 403 / Unauthorized = RDT not approved yet, skip silently
+        if ($response->status() === 403 || $code === 'Unauthorized') {
+            throw new RdtPendingReviewException('BuyerInfo not accessible');
+        }
+
+        // QuotaExceeded — wait 10s and retry once
+        if ($code === 'QuotaExceeded') {
+            Log::info("BuyerInfo QuotaExceeded for {$orderId}, retrying in 10s");
+            sleep(10);
+            $retry = $this->spApiGet($account, self::ORDERS_API_PATH . "/{$orderId}/buyerInfo");
+            if ($retry->successful()) {
+                return $retry->json()['payload'] ?? [];
+            }
+            throw new RdtPendingReviewException('BuyerInfo quota exceeded');
+        }
+
+        throw new \Exception($response->body());
     }
 
-    // ─── Fetch order items for a single order ─────────────────────
+    // ─── Fetch order items ────────────────────────────────────────
 
     /**
-     * GET /orders/v0/orders/{orderId}/orderItems
-     *
-     * Returns ASIN, SKU, title, qty, pricing etc.
-     * Handles NextToken pagination for orders with many items.
+     * BuyerCustomizedInfo is returned here automatically for
+     * Amazon Custom orders — no RDT required, just the regular token.
      */
     private function fetchOrderItems(AmazonAccount $account, string $orderId): array
     {
-        // Request a Restricted Data Token so Amazon includes
-        // BuyerCustomizedInfo and shippingAddress in the response.
-        // Falls back to regular access token if RDT request fails.
-        $rdt = $this->rdtService->getOrderItemsToken($account, $orderId);
-        usleep(self::SLEEP_RDT_MS); // Rate limit: 1 req/s on Tokens API
-
         $items     = [];
         $nextToken = null;
 
@@ -191,8 +158,7 @@ class SpApiService
             $response = $this->spApiGet(
                 $account,
                 self::ORDERS_API_PATH . "/{$orderId}/orderItems",
-                $params,
-                $rdt  // pass RDT as override token
+                $params
             );
 
             if ($response->failed()) {
@@ -210,10 +176,9 @@ class SpApiService
 
     // ─── Shared HTTP helper ───────────────────────────────────────
 
-    private function spApiGet(AmazonAccount $account, string $path, array $params = [], ?string $rdtToken = null)
+    private function spApiGet(AmazonAccount $account, string $path, array $params = [])
     {
-        // Use RDT if provided, otherwise use the regular LWA access token
-        $token    = $rdtToken ?? $this->oauthService->getValidAccessToken($account);
+        $token    = $this->oauthService->getValidAccessToken($account);
         $endpoint = $this->getEndpointForMarketplace(
             $account->marketplace_id ?? config('amazon-sp-api.default_marketplace_id')
         );
@@ -224,7 +189,7 @@ class SpApiService
         ])->get("{$endpoint}{$path}", $params);
     }
 
-    // ─── Upsert a single order ────────────────────────────────────
+    // ─── Upsert order ─────────────────────────────────────────────
 
     private function upsertOrder(AmazonAccount $account, array $data): Order
     {
@@ -246,7 +211,7 @@ class SpApiService
                 'is_prime'                  => filter_var($data['IsPrime'] ?? false, FILTER_VALIDATE_BOOLEAN),
                 'is_replacement_order'      => filter_var($data['IsReplacementOrder'] ?? false, FILTER_VALIDATE_BOOLEAN),
                 'buyer_email'               => $buyerInfo['BuyerEmail'] ?? null,
-                'buyer_name'               => $buyerInfo['BuyerName'] ?? null,
+                'buyer_name'                => $buyerInfo['BuyerName'] ?? null,
                 'order_total'               => $orderTotal['Amount'] ?? null,
                 'currency_code'             => $orderTotal['CurrencyCode'] ?? null,
                 'number_of_items_shipped'   => $data['NumberOfItemsShipped'] ?? 0,
@@ -273,19 +238,18 @@ class SpApiService
             $shipping         = $item['ShippingPrice'] ?? null;
             $customizationUrl = $item['BuyerCustomizedInfo']['CustomizedURL'] ?? null;
 
-            // Fetch & parse customization ZIP if present.
-            // NOTE: CustomizedURL is only returned when your SP-API app
-            // has the "Amazon Custom" role enabled in Developer Central.
-            // If $customizationUrl is always null, check your app's roles.
+            // Log if BuyerCustomizedInfo exists so we can debug
+            if (!empty($item['BuyerCustomizedInfo'])) {
+                Log::info('BuyerCustomizedInfo found', [
+                    'order_item_id'    => $item['OrderItemId'] ?? null,
+                    'customization_url' => $customizationUrl,
+                ]);
+            }
+
+            // Parse customization ZIP if URL present
             $customizationData = null;
             if ($customizationUrl) {
                 $customizationData = $this->customizationService->fetchAndParse($customizationUrl);
-            } elseif (!empty($item['BuyerCustomizedInfo'])) {
-                // BuyerCustomizedInfo exists but no URL — log for debugging
-                Log::info('BuyerCustomizedInfo present but no CustomizedURL', [
-                    'order_item_id' => $item['OrderItemId'] ?? null,
-                    'info'          => $item['BuyerCustomizedInfo'],
-                ]);
             }
 
             OrderItem::withoutGlobalScope('tenant')->updateOrCreate(
