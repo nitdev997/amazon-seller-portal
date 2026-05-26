@@ -159,17 +159,33 @@
                                         </svg>
                                         <span class="text-xs font-semibold text-orange-700 uppercase tracking-wide">Customization</span>
                                     </div>
-                                    <div class="px-3 py-2 grid grid-cols-1 gap-y-1.5">
+                                    <div class="px-3 py-2 space-y-2">
                                         @foreach($customFields as $field)
                                             @if(!empty($field['value']))
-                                            <div class="flex gap-2 text-xs">
-                                                <span class="text-orange-600 font-medium shrink-0 min-w-24">
-                                                    {{ $field['label'] ?? 'Field' }}:
-                                                </span>
-                                                <span class="text-orange-900 font-semibold break-all">
-                                                    {{ $field['value'] }}
-                                                </span>
-                                            </div>
+                                                @if(($field['type'] ?? 'text') === 'image')
+                                                {{-- Image field --}}
+                                                <div>
+                                                    <span class="text-xs text-orange-600 font-medium block mb-1">
+                                                        {{ $field['label'] ?? 'Image' }}:
+                                                    </span>
+                                                    <a href="{{ $field['url'] ?? asset('storage/' . $field['value']) }}"
+                                                       target="_blank" rel="noopener">
+                                                        <img src="{{ $field['url'] ?? asset('storage/' . $field['value']) }}"
+                                                             alt="{{ $field['label'] ?? 'Customization image' }}"
+                                                             class="max-h-40 rounded-lg border border-orange-200 object-contain bg-white cursor-zoom-in hover:opacity-90 transition">
+                                                    </a>
+                                                </div>
+                                                @else
+                                                {{-- Text field --}}
+                                                <div class="flex gap-2 text-xs">
+                                                    <span class="text-orange-600 font-medium shrink-0 min-w-28">
+                                                        {{ $field['label'] ?? 'Field' }}:
+                                                    </span>
+                                                    <span class="text-orange-900 font-semibold break-words">
+                                                        {{ $field['value'] }}
+                                                    </span>
+                                                </div>
+                                                @endif
                                             @endif
                                         @endforeach
                                     </div>

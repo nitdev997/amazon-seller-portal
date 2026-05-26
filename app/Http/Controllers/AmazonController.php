@@ -144,11 +144,18 @@ class AmazonController extends Controller
                 ->with('error', 'No connected Amazon account found.');
         }
 
-        try {
-            $synced = $this->apiService->syncOrders($account);
+        // ?limit=50 for quick test syncs, no param = full sync
+        $limit = $request->filled('limit') ? (int) $request->limit : null;
 
-            return redirect()->route('orders.index')
-                ->with('success', "Synced {$synced} orders from Amazon.");
+        try {
+            $synced = $this->apiService->syncOrders($account, limit: $limit);
+
+            $msg = $limit
+                ? "Test sync complete: fetched {$synced} orders (limit {$limit})."
+                : "Full sync complete: {$synced} orders synced.";
+
+            return redirect()->route('orders.index')->with('success', $msg);
+
         } catch (\Exception $e) {
             return redirect()->route('orders.index')
                 ->with('error', 'Sync failed: ' . $e->getMessage());

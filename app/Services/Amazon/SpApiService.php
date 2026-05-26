@@ -27,7 +27,7 @@ class SpApiService
 
     // ─── Sync orders ──────────────────────────────────────────────
 
-    public function syncOrders(AmazonAccount $account, ?Carbon $createdAfter = null): int
+    public function syncOrders(AmazonAccount $account, ?Carbon $createdAfter = null, ?int $limit = null): int
     {
         $createdAfter ??= now()->subDays(30);
         $synced    = 0;
@@ -40,6 +40,10 @@ class SpApiService
             $orders  = $payload['Orders'] ?? [];
 
             foreach ($orders as $amazonOrder) {
+                // Stop early if limit reached
+                if ($limit !== null && $synced >= $limit) {
+                    break 2;
+                }
                 $orderId = $amazonOrder['AmazonOrderId'];
 
                 // 1. Fetch buyer info (PII — skipped silently if 403)
@@ -249,7 +253,7 @@ class SpApiService
             // Parse customization ZIP if URL present
             $customizationData = null;
             if ($customizationUrl) {
-                $customizationData = $this->customizationService->fetchAndParse($customizationUrl);
+                $customizationData = $this->customizationService->fetchAndParse($customizationUrl, $item['OrderItemId'] ?? null);
             }
 
             OrderItem::withoutGlobalScope('tenant')->updateOrCreate(

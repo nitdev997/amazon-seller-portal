@@ -4,46 +4,48 @@ namespace App\Services\Amazon;
 
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 /**
- * Fetches and parses Amazon buyer customization data.
- *
- * Amazon provides customization info as a ZIP file at a signed URL
- * found in order item's BuyerCustomizedInfo.CustomizedURL field.
+ * Downloads and parses Amazon buyer customization ZIPs.
  *
  * The ZIP typically contains:
- *   - customization.json  (structured label/value pairs)
- *   - customization.xml   (older format, same data)
- *   - preview images      (.png/.jpg of the customized product)
+ *   - customization.json  → structured label/value pairs (text fields)
+ *   - customization.xml   → older format fallback
+ *   - *.jpg / *.png       → images uploaded by the buyer (photo keyring etc.)
+ *
+ * Text fields and image storage paths are returned together as a flat
+ * array of { label, value, type } objects stored in order_items.customization_data.
  */
 class CustomizationService
 {
+    // Where to store extracted images: storage/app/public/customizations/
+    private const IMAGE_DISK   = 'public';
+    private const IMAGE_FOLDER = 'customizations';
+
     /**
-     * Given a CustomizedURL, download the ZIP, extract customization
-     * fields, and return them as a flat key→value array.
-     *
-     * Returns null if the URL is empty or parsing fails.
+     * Fetch the ZIP from Amazon, extract all content, return parsed fields.
+     * Returns null if the URL is empty or parsing fails entirely.
      */
-    public function fetchAndParse(string $customizedUrl): ?array
+    public function fetchAndParse(string $customizedUrl, ?string $orderItemId = null): ?array
     {
         try {
-            // 1. Download the ZIP into a temp file
             $zipPath = $this->downloadZip($customizedUrl);
             if (!$zipPath) {
                 return null;
             }
 
-            // 2. Extract and parse inside the ZIP
-            $data = $this->extractCustomizationData($zipPath);
+            $data = $this->extractAll($zipPath, $orderItemId);
 
-            // 3. Cleanup temp file
             @unlink($zipPath);
 
-            return $data;
+            return !empty($data) ? $data : null;
 
         } catch (\Exception $e) {
             Log::warning('Customization parse failed: ' . $e->getMessage(), [
-                'url' => $customizedUrl,
+                'url'           => $customizedUrl,
+                'order_item_id' => $orderItemId,
             ]);
             return null;
         }
@@ -53,10 +55,10 @@ class CustomizationService
 
     private function downloadZip(string $url): ?string
     {
-        $response = Http::timeout(15)->get($url);
+        $response = Http::timeout(20)->get($url);
 
         if ($response->failed()) {
-            Log::warning('Could not download customization ZIP', ['url' => $url]);
+            Log::warning('Could not download customization ZIP', ['url' => $url, 'status' => $response->status()]);
             return null;
         }
 
@@ -66,48 +68,98 @@ class CustomizationService
         return $tmpPath;
     }
 
-    // ─── Extract and parse ZIP contents ──────────────────────────
+    // ─── Extract everything from the ZIP ─────────────────────────
 
-    private function extractCustomizationData(string $zipPath): ?array
+    private function extractAll(string $zipPath, ?string $orderItemId): array
     {
         $zip = new \ZipArchive();
 
         if ($zip->open($zipPath) !== true) {
-            throw new \Exception('Could not open ZIP file');
+            throw new \Exception('Could not open customization ZIP');
         }
 
-        $result = null;
+        $textFields = [];
+        $imageFiles = [];
 
         for ($i = 0; $i < $zip->numFiles; $i++) {
-            $filename = $zip->getNameIndex($i);
-            $contents = $zip->getFromIndex($i);
+            $filename  = $zip->getNameIndex($i);
+            $extension = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+            $contents  = $zip->getFromIndex($i);
 
-            // Prefer JSON format
-            if (str_ends_with(strtolower($filename), '.json')) {
-                $result = $this->parseJson($contents);
-                break;
+            // ── Text / structured data ──────────────────────────
+            if ($extension === 'json') {
+                $parsed = $this->parseJson($contents);
+                if ($parsed) {
+                    $textFields = array_merge($textFields, $parsed);
+                }
+                continue;
             }
 
-            // Fall back to XML
-            if (str_ends_with(strtolower($filename), '.xml')) {
-                $result = $this->parseXml($contents);
-                // Don't break — keep looking for a JSON file
+            if ($extension === 'xml') {
+                // Only use XML if no JSON was found yet
+                if (empty($textFields)) {
+                    $parsed = $this->parseXml($contents);
+                    if ($parsed) {
+                        $textFields = $parsed;
+                    }
+                }
+                continue;
+            }
+
+            // ── Images ─────────────────────────────────────────
+            if (in_array($extension, ['jpg', 'jpeg', 'png', 'gif', 'webp'])) {
+                $storedPath = $this->storeImage($contents, $filename, $orderItemId, $extension);
+                if ($storedPath) {
+                    $imageFiles[] = [
+                        'label' => $this->labelFromFilename($filename),
+                        'value' => $storedPath,           // relative storage path
+                        'url'   => Storage::disk(self::IMAGE_DISK)->url($storedPath),
+                        'type'  => 'image',
+                    ];
+                }
             }
         }
 
         $zip->close();
 
-        return $result;
+        // Text fields first, images after
+        return array_merge($textFields, $imageFiles);
     }
 
-    // ─── Parse JSON customization format ─────────────────────────
+    // ─── Store image to disk ──────────────────────────────────────
+
+    private function storeImage(
+        string $contents,
+        string $originalFilename,
+        ?string $orderItemId,
+        string $extension
+    ): ?string {
+        try {
+            // Subfolder per order item to avoid collisions
+            $folder   = self::IMAGE_FOLDER . '/' . ($orderItemId ?? Str::random(8));
+            $filename = Str::slug(pathinfo($originalFilename, PATHINFO_FILENAME))
+                      . '_' . uniqid()
+                      . '.' . $extension;
+
+            $path = $folder . '/' . $filename;
+
+            Storage::disk(self::IMAGE_DISK)->put($path, $contents);
+
+            return $path; // e.g. customizations/62040955019962/uploaded_photo_abc123.jpg
+
+        } catch (\Exception $e) {
+            Log::warning('Could not store customization image: ' . $e->getMessage());
+            return null;
+        }
+    }
+
+    // ─── Parse JSON format ────────────────────────────────────────
 
     /**
-     * Amazon JSON format example:
-     * {
-     *   "customizationList": [
-     *     { "label": "Name on product", "value": "John" },
-     *     { "label": "Font",            "value": "Script" }
+     * Amazon JSON structure:
+     * { "customizationList": [
+     *     { "label": "Back engraving", "value": "Anto Melanie 22.08.", "type": "text" },
+     *     { "label": "Uploaded Photo",  "value": "...", "type": "image" }
      *   ]
      * }
      */
@@ -118,68 +170,102 @@ class CustomizationService
             return null;
         }
 
-        // Standard Amazon format: customizationList array
-        if (!empty($decoded['customizationList'])) {
-            $result = [];
-            foreach ($decoded['customizationList'] as $item) {
-                $label = $item['label'] ?? $item['name'] ?? "Field";
-                $value = $item['value'] ?? $item['selectedValue'] ?? '';
-                $result[] = [
-                    'label'    => $label,
-                    'value'    => $value,
-                    'type'     => $item['type'] ?? 'text',
-                    'sequence' => $item['sequenceNumber'] ?? null,
-                ];
+        $result = [];
+
+        $list = $decoded['customizationList']
+            ?? $decoded['customizations']
+            ?? $decoded['surfaces'][0]['colorMaps'][0]['customizations']  // nested format
+            ?? [];
+
+        // Handle nested surfaces format
+        if (empty($list) && !empty($decoded['surfaces'])) {
+            foreach ($decoded['surfaces'] as $surface) {
+                foreach ($surface['colorMaps'] ?? [] as $colorMap) {
+                    foreach ($colorMap['customizations'] ?? [] as $custom) {
+                        $list[] = $custom;
+                    }
+                }
             }
-            // Sort by sequence number if present
-            usort($result, fn($a, $b) => ($a['sequence'] ?? 0) <=> ($b['sequence'] ?? 0));
-            return $result;
         }
 
-        // Return raw decoded data if structure is different
-        return $decoded;
+        foreach ($list as $item) {
+            $label = $item['label']
+                  ?? $item['name']
+                  ?? $item['customizationType']
+                  ?? 'Customization';
+
+            $value = $item['value']
+                  ?? $item['selectedValue']
+                  ?? $item['customizationValue']
+                  ?? '';
+
+            $type = $item['type'] ?? 'text';
+
+            // Skip if value is empty or is just a URL (images handled separately via ZIP files)
+            if (empty($value) || filter_var($value, FILTER_VALIDATE_URL)) {
+                continue;
+            }
+
+            $result[] = [
+                'label'    => $label,
+                'value'    => $value,
+                'type'     => $type,
+                'sequence' => $item['sequenceNumber'] ?? $item['sequence'] ?? null,
+            ];
+        }
+
+        // Sort by sequence
+        usort($result, fn($a, $b) => ($a['sequence'] ?? 999) <=> ($b['sequence'] ?? 999));
+
+        return !empty($result) ? $result : null;
     }
 
-    // ─── Parse XML customization format ──────────────────────────
+    // ─── Parse XML format ─────────────────────────────────────────
 
-    /**
-     * Amazon XML format example:
-     * <customizations>
-     *   <customization>
-     *     <label>Name on product</label>
-     *     <value>John</value>
-     *   </customization>
-     * </customizations>
-     */
     private function parseXml(string $contents): ?array
     {
         libxml_use_internal_errors(true);
         $xml = simplexml_load_string($contents);
-
         if ($xml === false) {
             return null;
         }
 
         $result = [];
 
-        // Handle <customizations><customization>... format
-        foreach ($xml->customization ?? [] as $item) {
-            $result[] = [
-                'label' => (string)($item->label ?? $item->Label ?? ''),
-                'value' => (string)($item->value ?? $item->Value ?? ''),
-                'type'  => 'text',
-            ];
+        foreach ($xml->customization ?? $xml->Customization ?? [] as $item) {
+            $label = (string)($item->label ?? $item->Label ?? $item->name ?? '');
+            $value = (string)($item->value ?? $item->Value ?? '');
+
+            if ($label && $value) {
+                $result[] = ['label' => $label, 'value' => $value, 'type' => 'text'];
+            }
         }
 
-        // Handle <CustomTextCustomizations><CustomTextCustomization>... format
+        // Amazon Custom XML variant
         foreach ($xml->CustomTextCustomization ?? [] as $item) {
-            $result[] = [
-                'label' => (string)($item->Label ?? ''),
-                'value' => (string)($item->Value ?? ''),
-                'type'  => 'text',
-            ];
+            $label = (string)($item->Label ?? '');
+            $value = (string)($item->Value ?? '');
+            if ($label && $value) {
+                $result[] = ['label' => $label, 'value' => $value, 'type' => 'text'];
+            }
         }
 
         return !empty($result) ? $result : null;
+    }
+
+    // ─── Human-readable label from filename ───────────────────────
+
+    private function labelFromFilename(string $filename): string
+    {
+        $base = pathinfo($filename, PATHINFO_FILENAME);
+
+        // Common Amazon file names
+        return match (strtolower($base)) {
+            'front', 'front_image'             => 'Front Image',
+            'back',  'back_image'              => 'Back Image',
+            'uploaded_image', 'buyer_image'    => 'Uploaded Photo',
+            'preview', 'product_preview'       => 'Preview Image',
+            default => ucwords(str_replace(['_', '-'], ' ', $base)),
+        };
     }
 }
