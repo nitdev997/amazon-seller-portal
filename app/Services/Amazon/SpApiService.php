@@ -280,6 +280,35 @@ class SpApiService
         }
     }
 
+    // ─── Debug helper ────────────────────────────────────────────
+
+    /**
+     * Dump the raw API response for a single order's items.
+     * Use this to confirm whether BuyerCustomizedInfo is returned.
+     * Remove after debugging.
+     */
+    public function debugOrderItems(AmazonAccount $account, string $orderId): array
+    {
+        $response = $this->spApiGet(
+            $account,
+            self::ORDERS_API_PATH . "/{$orderId}/orderItems"
+        );
+
+        return [
+            'status'           => $response->status(),
+            'order_id'         => $orderId,
+            'raw_response'     => $response->json(),
+            'has_customization' => collect($response->json()['payload']['OrderItems'] ?? [])
+                ->map(fn($item) => [
+                    'order_item_id'          => $item['OrderItemId'] ?? null,
+                    'asin'                   => $item['ASIN'] ?? null,
+                    'has_buyer_custom_info'  => isset($item['BuyerCustomizedInfo']),
+                    'buyer_custom_info'      => $item['BuyerCustomizedInfo'] ?? null,
+                    'all_keys'               => array_keys($item),
+                ])->toArray(),
+        ];
+    }
+
     // ─── Marketplace endpoint map ─────────────────────────────────
 
     private function getEndpointForMarketplace(?string $marketplaceId): string

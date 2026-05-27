@@ -34,3 +34,14 @@ Route::middleware('auth')->group(function () {
         Route::get('/sync',          [AmazonController::class, 'sync'])->name('sync');
     });
 });
+
+
+// TEMPORARY DEBUG ROUTE — remove after testing
+Route::get('/debug/sync-order/{orderId}', function (string $orderId) {
+    $account = auth()->user()->tenant->activeAmazonAccount();
+    $service = app(\App\Services\Amazon\SpApiService::class);
+
+    // Dump raw API response for order items
+    $result = $service->debugOrderItems($account, $orderId);
+    return response()->json($result);
+})->middleware('auth');
