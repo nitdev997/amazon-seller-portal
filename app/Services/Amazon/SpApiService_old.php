@@ -33,10 +33,6 @@ class SpApiService
         $synced    = 0;
         $nextToken = null;
 
-        // Get ONE RDT token valid for all orders (saves individual token requests)
-        $rdtToken = $this->getRdtToken($account);
-        Log::info('Bulk RDT token obtained for order items');
-
         do {
             $response = $this->fetchOrderPage($account, $createdAfter, $nextToken);
 
@@ -67,10 +63,11 @@ class SpApiService
                 // 2. Upsert order row
                 $order = $this->upsertOrder($account, $amazonOrder);
 
-                // 3. Fetch order items with RDT token — required for BuyerCustomizedInfo
+                // 3. Fetch order items — BuyerCustomizedInfo is returned here
+                //    automatically for Amazon Custom orders. No RDT needed.
                 usleep(self::SLEEP_ORDER_ITEMS_MS);
                 try {
-                    $items = $this->fetchOrderItems($account, $orderId, $rdtToken);
+                    $items = $this->fetchOrderItems($account, $orderId);
                     if (!empty($items)) {
                         $this->upsertOrderItems($order, $items);
                     }
@@ -155,17 +152,16 @@ class SpApiService
      * BuyerCustomizedInfo is returned here automatically for
      * Amazon Custom orders — no RDT required, just the regular token.
      */
-    private function fetchOrderItems(AmazonAccount $account, string $orderId, ?string $rdtToken = null): array
+    private function fetchOrderItems(AmazonAccount $account, string $orderId): array
     {
         $items     = [];
         $nextToken = null;
 
         do {
             $params   = $nextToken ? ['NextToken' => $nextToken] : [];
-            $response = $this->spApiGetWithToken(
+            $response = $this->spApiGet(
                 $account,
                 self::ORDERS_API_PATH . "/{$orderId}/orderItems",
-                $rdtToken,
                 $params
             );
 
@@ -282,67 +278,6 @@ class SpApiService
                 ]
             );
         }
-    }
-
-    // ─── Get RDT token for BuyerCustomizedInfo ──────────────────
-
-    /**
-     * Get a Restricted Data Token (RDT) for /orderItems endpoint.
-     * Required to receive BuyerCustomizedInfo (ZIP download URL).
-     * One token is valid for all orders — request once per sync.
-     */
-    private function getRdtToken(AmazonAccount $account): ?string
-    {
-        try {
-            $token    = $this->oauthService->getValidAccessToken($account);
-            $endpoint = $this->getEndpointForMarketplace(
-                $account->marketplace_id ?? config('amazon-sp-api.default_marketplace_id')
-            );
-
-            $response = Http::withHeaders([
-                'x-amz-access-token' => $token,
-                'Content-Type'       => 'application/json',
-            ])->post("{$endpoint}/tokens/2021-03-01/restrictedDataToken", [
-                'restrictedResources' => [[
-                    'method'       => 'GET',
-                    'path'         => '/orders/v0/orders/{orderId}/orderItems',
-                    'dataElements' => ['buyerInfo'],
-                ]],
-            ]);
-
-            if ($response->failed()) {
-                Log::warning('Failed to get RDT token: ' . $response->body());
-                return null;
-            }
-
-            return $response->json()['restrictedDataToken'] ?? null;
-        } catch (\Exception $e) {
-            Log::warning('getRdtToken exception: ' . $e->getMessage());
-            return null;
-        }
-    }
-
-    // ─── Shared HTTP helper with custom token ─────────────────────
-
-    /**
-     * Same as spApiGet but uses a provided token (e.g. RDT token)
-     * instead of fetching a fresh access token.
-     */
-    private function spApiGetWithToken(AmazonAccount $account, string $path, ?string $token = null, array $params = [])
-    {
-        if (!$token) {
-            // Fallback to normal access token if no RDT token provided
-            return $this->spApiGet($account, $path, $params);
-        }
-
-        $endpoint = $this->getEndpointForMarketplace(
-            $account->marketplace_id ?? config('amazon-sp-api.default_marketplace_id')
-        );
-
-        return Http::withHeaders([
-            'x-amz-access-token' => $token,
-            'Content-Type'       => 'application/json',
-        ])->get("{$endpoint}{$path}", $params);
     }
 
     // ─── Debug helper ────────────────────────────────────────────
