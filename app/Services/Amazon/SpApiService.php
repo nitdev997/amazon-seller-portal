@@ -21,8 +21,9 @@ class SpApiService
     private const SLEEP_ORDER_ITEMS_MS = 2000000; // 2s
 
     public function __construct(
-        private readonly SpApiOAuthService    $oauthService,
-        private readonly CustomizationService $customizationService,
+        private readonly SpApiOAuthService         $oauthService,
+        private readonly CustomizationService      $customizationService,
+        private readonly RestrictedDataTokenService $rdtService,
     ) {}
 
     // ─── Sync orders ──────────────────────────────────────────────
@@ -287,39 +288,11 @@ class SpApiService
     // ─── Get RDT token for BuyerCustomizedInfo ──────────────────
 
     /**
-     * Get a Restricted Data Token (RDT) for /orderItems endpoint.
-     * Required to receive BuyerCustomizedInfo (ZIP download URL).
-     * One token is valid for all orders — request once per sync.
+     * Delegates to RestrictedDataTokenService — bulk token for all orders.
      */
     private function getRdtToken(AmazonAccount $account): ?string
     {
-        try {
-            $token    = $this->oauthService->getValidAccessToken($account);
-            $endpoint = $this->getEndpointForMarketplace(
-                $account->marketplace_id ?? config('amazon-sp-api.default_marketplace_id')
-            );
-
-            $response = Http::withHeaders([
-                'x-amz-access-token' => $token,
-                'Content-Type'       => 'application/json',
-            ])->post("{$endpoint}/tokens/2021-03-01/restrictedDataToken", [
-                'restrictedResources' => [[
-                    'method'       => 'GET',
-                    'path'         => '/orders/v0/orders/{orderId}/orderItems',
-                    'dataElements' => ['buyerInfo'],
-                ]],
-            ]);
-
-            if ($response->failed()) {
-                Log::warning('Failed to get RDT token: ' . $response->body());
-                return null;
-            }
-
-            return $response->json()['restrictedDataToken'] ?? null;
-        } catch (\Exception $e) {
-            Log::warning('getRdtToken exception: ' . $e->getMessage());
-            return null;
-        }
+        return $this->rdtService->getBulkOrderItemsToken($account);
     }
 
     // ─── Shared HTTP helper with custom token ─────────────────────

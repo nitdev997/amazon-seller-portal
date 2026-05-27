@@ -25,12 +25,7 @@ class RestrictedDataTokenService
      *
      * Returns the RDT string, or null if the request fails.
      */
-    /**
-     * Request a BULK RDT token valid for ALL orders.
-     * Uses generic {orderId} placeholder — one token request for entire sync.
-     * Much more efficient than requesting per-order tokens.
-     */
-    public function getBulkOrderItemsToken(AmazonAccount $account): ?string
+    public function getOrderItemsToken(AmazonAccount $account, string $orderId): ?string
     {
         try {
             $accessToken = $this->oauthService->getValidAccessToken($account);
@@ -42,38 +37,29 @@ class RestrictedDataTokenService
             ])->post("{$endpoint}" . self::TOKENS_API_PATH, [
                 'restrictedResources' => [
                     [
-                        // Generic placeholder path = valid for ALL orders (bulk token)
-                        'method'       => 'GET',
-                        'path'         => '/orders/v0/orders/{orderId}/orderItems',
-                        'dataElements' => ['buyerInfo'],
+                        // The specific order items path for this order
+                        'method'             => 'GET',
+                        'path'               => "/orders/v0/orders/{$orderId}/orderItems",
+                        'dataElements'       => ['buyerInfo', 'shippingAddress'],
                     ],
                 ],
             ]);
 
             if ($response->failed()) {
-                Log::warning('RDT bulk request failed', [
-                    'status' => $response->status(),
-                    'body'   => $response->body(),
+                Log::warning('RDT request failed', [
+                    'order_id' => $orderId,
+                    'status'   => $response->status(),
+                    'body'     => $response->body(),
                 ]);
                 return null;
             }
 
-            Log::info('Bulk RDT token obtained successfully');
             return $response->json()['restrictedDataToken'] ?? null;
 
         } catch (\Exception $e) {
             Log::warning('RDT exception: ' . $e->getMessage());
             return null;
         }
-    }
-
-    /**
-     * @deprecated Use getBulkOrderItemsToken() instead.
-     * Kept for backwards compatibility.
-     */
-    public function getOrderItemsToken(AmazonAccount $account, string $orderId): ?string
-    {
-        return $this->getBulkOrderItemsToken($account);
     }
 
     private function getEndpoint(?string $marketplaceId): string

@@ -55,7 +55,7 @@ class CustomizationService
 
     private function downloadZip(string $url): ?string
     {
-        $response = Http::timeout(60)->get($url);
+        $response = Http::timeout(20)->get($url);
 
         if ($response->failed()) {
             Log::warning('Could not download customization ZIP', ['url' => $url, 'status' => $response->status()]);
@@ -156,31 +156,12 @@ class CustomizationService
     // ─── Parse JSON format ────────────────────────────────────────
 
     /**
-     * Amazon JSON structure (customizationData.children tree):
-     * {
-     *   "customizationData": {
-     *     "children": [           <- surface (front/back)
-     *       { "children": [       <- layer
-     *           { "children": [   <- group
-     *               { "children": [
-     *                   {
-     *                     "type": "ImageCustomization",
-     *                     "label": "Foto",
-     *                     "image": { "imageName": "foto.jpg" }
-     *                   },
-     *                   {
-     *                     "type": "TextCustomization",
-     *                     "label": "Gravur",
-     *                     "value": "Max Mustermann"
-     *                   }
-     *               ]}
-     *           ]}
-     *       ]}
-     *     ]
-     *   }
+     * Amazon JSON structure:
+     * { "customizationList": [
+     *     { "label": "Back engraving", "value": "Anto Melanie 22.08.", "type": "text" },
+     *     { "label": "Uploaded Photo",  "value": "...", "type": "image" }
+     *   ]
      * }
-     *
-     * Also supports flat formats: customizationList, customizations, surfaces
      */
     private function parseJson(string $contents): ?array
     {
@@ -191,44 +172,12 @@ class CustomizationService
 
         $result = [];
 
-        // ── Format 1: customizationData.children (Amazon Custom tree format) ──
-        if (!empty($decoded['customizationData']['children'])) {
-            $nodes = $this->flattenChildren($decoded['customizationData']['children']);
-            foreach ($nodes as $node) {
-                $type  = $node['type'] ?? '';
-                $label = $node['label'] ?? $node['name'] ?? 'Customization';
-
-                if ($type === 'ImageCustomization') {
-                    $imageName = $node['image']['imageName'] ?? null;
-                    if ($imageName) {
-                        $result[] = [
-                            'label' => $label ?: 'Uploaded Photo',
-                            'value' => $imageName,
-                            'type'  => 'image_filename', // filename inside ZIP
-                        ];
-                    }
-                } elseif ($type === 'TextCustomization' || !empty($node['value'])) {
-                    $value = $node['value'] ?? $node['selectedValue'] ?? '';
-                    if (!empty($value) && !filter_var($value, FILTER_VALIDATE_URL)) {
-                        $result[] = [
-                            'label' => $label,
-                            'value' => $value,
-                            'type'  => 'text',
-                        ];
-                    }
-                }
-            }
-            if (!empty($result)) {
-                return $result;
-            }
-        }
-
-        // ── Format 2: flat customizationList / customizations ──
         $list = $decoded['customizationList']
-             ?? $decoded['customizations']
-             ?? [];
+            ?? $decoded['customizations']
+            ?? $decoded['surfaces'][0]['colorMaps'][0]['customizations']  // nested format
+            ?? [];
 
-        // ── Format 3: surfaces.colorMaps.customizations ──
+        // Handle nested surfaces format
         if (empty($list) && !empty($decoded['surfaces'])) {
             foreach ($decoded['surfaces'] as $surface) {
                 foreach ($surface['colorMaps'] ?? [] as $colorMap) {
@@ -252,6 +201,7 @@ class CustomizationService
 
             $type = $item['type'] ?? 'text';
 
+            // Skip if value is empty or is just a URL (images handled separately via ZIP files)
             if (empty($value) || filter_var($value, FILTER_VALIDATE_URL)) {
                 continue;
             }
@@ -268,25 +218,6 @@ class CustomizationService
         usort($result, fn($a, $b) => ($a['sequence'] ?? 999) <=> ($b['sequence'] ?? 999));
 
         return !empty($result) ? $result : null;
-    }
-
-    /**
-     * Recursively flatten customizationData.children tree into a flat node list.
-     */
-    private function flattenChildren(array $children): array
-    {
-        $nodes = [];
-        foreach ($children as $child) {
-            // Leaf node = has a type we care about
-            if (!empty($child['type'])) {
-                $nodes[] = $child;
-            }
-            // Recurse into nested children
-            if (!empty($child['children'])) {
-                $nodes = array_merge($nodes, $this->flattenChildren($child['children']));
-            }
-        }
-        return $nodes;
     }
 
     // ─── Parse XML format ─────────────────────────────────────────
