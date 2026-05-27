@@ -327,10 +327,18 @@ class SpApiService
      */
     public function debugOrderItems(AmazonAccount $account, string $orderId): array
     {
-        $response = $this->spApiGet(
+        // Get RDT token — without it, no BuyerCustomizedInfo is returned!
+        $rdtToken = $this->getRdtToken($account);
+
+        $response = $this->spApiGetWithToken(  // ← Use RDT token
             $account,
-            self::ORDERS_API_PATH . "/{$orderId}/orderItems"
+            self::ORDERS_API_PATH . "/{$orderId}/orderItems",
+            $rdtToken
         );
+        // $response = $this->spApiGet(
+        //     $account,
+        //     self::ORDERS_API_PATH . "/{$orderId}/orderItems"
+        // );
 
         return [
             'status'           => $response->status(),
