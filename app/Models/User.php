@@ -20,6 +20,7 @@ class User extends Authenticatable
         'email',
         'password',
         'role',
+        'is_super_admin',
         'is_active',
     ];
 
@@ -28,6 +29,7 @@ class User extends Authenticatable
     protected $casts = [
         'email_verified_at' => 'datetime',
         'is_active'         => 'boolean',
+        'is_super_admin'    => 'boolean',
         'password'          => 'hashed',
     ];
 
@@ -40,7 +42,13 @@ class User extends Authenticatable
 
     // ─── Role helpers ─────────────────────────────────────────────
 
-    public function isOwner(): bool  { return $this->role === 'owner'; }
-    public function isAdmin(): bool  { return in_array($this->role, ['owner', 'admin']); }
-    public function isMember(): bool { return $this->role === 'member'; }
+    public function isOwner(): bool       { return $this->role === 'owner'; }
+    public function isAdmin(): bool       { return in_array($this->role, ['owner', 'admin']); }
+    public function isMember(): bool      { return $this->role === 'member'; }
+
+    /**
+     * Platform-level super admin — distinct from tenant-level "owner".
+     * Super admins can manage users and view orders across ALL tenants.
+     */
+    public function isSuperAdmin(): bool  { return (bool) $this->is_super_admin; }
 }

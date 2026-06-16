@@ -1,5 +1,9 @@
 <?php
 
+use App\Http\Controllers\Admin\DashboardController as AdminDashboardController;
+use App\Http\Controllers\Admin\OrderController as AdminOrderController;
+use App\Http\Controllers\Admin\TenantController as AdminTenantController;
+use App\Http\Controllers\Admin\UserController as AdminUserController;
 use App\Http\Controllers\AmazonController;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\DashboardController;
@@ -13,7 +17,7 @@ Route::middleware('guest')->group(function () {
     Route::post('/login', [LoginController::class, 'login']);
 });
 
-// ─── Authenticated routes ─────────────────────────────────────────────────────
+// ─── Authenticated routes (seller / tenant area) ──────────────────────────────
 
 Route::middleware('auth')->group(function () {
 
@@ -24,6 +28,7 @@ Route::middleware('auth')->group(function () {
     // Orders
     Route::get('/orders',          [DashboardController::class, 'orders'])->name('orders.index');
     Route::get('/orders/{orderId}', [OrderController::class, 'show'])->name('orders.show');
+    Route::post('/orders/{orderId}/items/{itemId}/customization', [OrderController::class, 'saveCustomization'])->name('orders.customization.save');
 
     // Amazon SP-API OAuth + management
     Route::prefix('amazon')->name('amazon.')->group(function () {
@@ -33,6 +38,31 @@ Route::middleware('auth')->group(function () {
         Route::delete('/disconnect', [AmazonController::class, 'disconnect'])->name('disconnect');
         Route::get('/sync',          [AmazonController::class, 'sync'])->name('sync');
     });
+});
+
+// ─── Platform admin routes (super admins only) ────────────────────────────────
+
+Route::middleware(['auth', 'super_admin'])->prefix('admin')->name('admin.')->group(function () {
+
+    Route::get('/', [AdminDashboardController::class, 'index'])->name('dashboard');
+
+    // Users — full CRUD across all tenants
+    Route::get('/users',                    [AdminUserController::class, 'index'])->name('users.index');
+    Route::get('/users/create',             [AdminUserController::class, 'create'])->name('users.create');
+    Route::post('/users',                   [AdminUserController::class, 'store'])->name('users.store');
+    Route::get('/users/{user}/edit',        [AdminUserController::class, 'edit'])->name('users.edit');
+    Route::put('/users/{user}',             [AdminUserController::class, 'update'])->name('users.update');
+    Route::delete('/users/{user}',          [AdminUserController::class, 'destroy'])->name('users.destroy');
+    Route::patch('/users/{user}/toggle',    [AdminUserController::class, 'toggleActive'])->name('users.toggle');
+
+    // Tenants — lightweight management
+    Route::get('/tenants',          [AdminTenantController::class, 'index'])->name('tenants.index');
+    Route::get('/tenants/create',   [AdminTenantController::class, 'create'])->name('tenants.create');
+    Route::post('/tenants',         [AdminTenantController::class, 'store'])->name('tenants.store');
+
+    // Orders — read-only, across every tenant
+    Route::get('/orders',           [AdminOrderController::class, 'index'])->name('orders.index');
+    Route::get('/orders/{orderId}', [AdminOrderController::class, 'show'])->name('orders.show');
 });
 
 
